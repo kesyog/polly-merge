@@ -40,6 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from distutils import util as distutils_util
+from itertools import chain
 from multiprocessing.dummy import Pool
 
 try:
@@ -155,14 +156,37 @@ class BitbucketApi:
     def __init__(self, base_url, auth_header):
         self.base_url = base_url
         self.auth_header = auth_header
+        self.username = self.get_username()
+
+    def get_username(self):
+        """Get the authenticated user's username"""
+        username_ok, username_data, _ = get_url(
+            f"{self.base_url}/plugins/servlet/applinks/whoami", headers=self.auth_header
+        )
+        assert username_ok, "error fetching username"
+        return username_data.decode("utf-8")
 
     def get_open_prs(self):
         """Return list of open prs"""
-        return get_paged_api(
-            f"{self.base_url}/rest/api/1.0/dashboard/pull-requests",
-            headers=self.auth_header,
-            params={"state": "open", "role": "author"},
+
+        def get_prs(params):
+            """Helper function to fetch PR's with the given params"""
+            return get_paged_api(
+                f"{self.base_url}/rest/api/1.0/dashboard/pull-requests",
+                headers=self.auth_header,
+                params=params,
+            )
+
+        # Making two requests simultaneously is faster than making one big request and filtering
+        # client-side
+        # TODO: make this optional
+        params = (
+            {"state": "open", "role": "author"},
+            {"state": "open", "role": "reviewer", "participantStatus": "approved"},
         )
+        with Pool(processes=len(params)) as pool:
+            prs = pool.map(get_prs, params)
+        return list(chain(*prs))
 
     @staticmethod
     def recurse_comments(comments, comments_text, username_filter):
@@ -297,7 +321,7 @@ class BitbucketApi:
         pullrequestid = pr_data["id"]
 
         if current_user_only_comments:
-            username = pr_data["author"]["user"]["name"]
+            username = self.username
         else:
             username = None
 
